@@ -410,6 +410,9 @@ export class ResourceManagerService {
       if (pdkId === 'ICS55') {
         env.ICS55_PDK_ROOT = entry.canonical_path
       }
+      if (pdkId === 'IHP130' || pdkId === 'IHP_SG13G2') {
+        env.IHP130_PDK_ROOT = entry.canonical_path
+      }
     }
 
     return env
@@ -584,7 +587,7 @@ export class ResourceManagerService {
       id: scanned.pdkId,
       name: scanned.name,
       pdk_id: scanned.pdkId,
-      version: '',
+      version: scanned.version,
       sha256: '',
       source: 'local',
       source_url: '',
@@ -698,7 +701,7 @@ export class ResourceManagerService {
       id: pdkId,
       name: scanned.name,
       pdk_id: pdkId,
-      version: '',
+      version: scanned.version,
       sha256: '',
       source: 'local',
       source_url: '',
@@ -2347,6 +2350,7 @@ async function scanPdkDirectory(path: string): Promise<{
   description: string
   techNode: string
   pdkId: string
+  version: string
   detectedFiles: { directories: string[]; files: string[] }
 }> {
   const canonicalPath = resolve(path)
@@ -2369,6 +2373,16 @@ async function scanPdkDirectory(path: string): Promise<{
     description = 'ICSPROUT 55nm process library (auto-detected)'
     techNode = '55nm'
     pdkId = 'ics55'
+  } else if (
+    files.some((file) => file.includes('sg13g2')) ||
+    directories.some(
+      (directory) => directory.includes('sg13g2') || directory.includes('ihp'),
+    )
+  ) {
+    name = 'IHP SG13G2 PDK'
+    description = 'IHP 130nm BiCMOS open-source PDK (auto-detected)'
+    techNode = '130nm'
+    pdkId = 'ihp130'
   } else if (directories.some((directory) => directory.startsWith('sky130'))) {
     name = 'SkyWater SKY130 PDK'
     description = 'SkyWater 130nm open-source PDK (auto-detected)'
@@ -2378,12 +2392,17 @@ async function scanPdkDirectory(path: string): Promise<{
     description = 'Process library files detected'
   }
 
+  const folderName = basename(canonicalPath)
+  const versionMatch = folderName.match(/(?:v|pdk-)?(\d+\.\d+(?:\.\d+)?(?:-\w+)?)/i)
+  const version = versionMatch?.[1] || ''
+
   return {
     canonicalPath,
     name,
     description,
     techNode,
     pdkId,
+    version,
     detectedFiles: { directories, files },
   }
 }

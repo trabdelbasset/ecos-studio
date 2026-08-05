@@ -867,10 +867,12 @@ describe('ResourceManagerService', () => {
     const inactiveRoot = join(toolsDir, 'inactive', '1.0')
     const missingRoot = join(toolsDir, 'missing', '1.0')
     const ics55Root = join(pdksDir, 'ics55', '1.10.100')
+    const ihp130Root = join(pdksDir, 'ihp130', '1.0.0')
     await mkdir(join(yosysRoot, 'bin'), { recursive: true })
     await mkdir(join(duplicateRoot, 'bin'), { recursive: true })
     await mkdir(join(inactiveRoot, 'bin'), { recursive: true })
     await mkdir(ics55Root, { recursive: true })
+    await mkdir(ihp130Root, { recursive: true })
     await mkdir(resourcesDir, { recursive: true })
     await writeFile(join(yosysRoot, 'bin', 'yosys'), '#!/bin/sh\n', 'utf8')
     await writeFile(join(duplicateRoot, 'bin', 'duplicate'), '#!/bin/sh\n', 'utf8')
@@ -931,6 +933,18 @@ describe('ResourceManagerService', () => {
             managed: true,
             health: 'ok',
           },
+          'pdk:ihp130': {
+            type: 'pdk',
+            id: 'ihp130',
+            name: 'IHP SG13G2 130nm',
+            pdk_id: 'ihp130',
+            version: '1.0.0',
+            path: ihp130Root,
+            canonical_path: ihp130Root,
+            active: true,
+            managed: true,
+            health: 'ok',
+          },
         },
       }),
       'utf8',
@@ -969,6 +983,8 @@ describe('ResourceManagerService', () => {
     expect(env.ECOS_ELECTRON_OSS_CAD_DIR).toBe(yosysRoot)
     expect(env.CHIPCOMPILER_ICS55_PDK_ROOT).toBe(ics55Root)
     expect(env.ICS55_PDK_ROOT).toBe(ics55Root)
+    expect(env.CHIPCOMPILER_IHP130_PDK_ROOT).toBe(ihp130Root)
+    expect(env.IHP130_PDK_ROOT).toBe(ihp130Root)
     expect(env.KEEP_ME).toBe('yes')
     expect(env.PATH).not.toContain(join(inactiveRoot, 'bin'))
     expect(env.PATH).not.toContain(join(missingRoot, 'bin'))
