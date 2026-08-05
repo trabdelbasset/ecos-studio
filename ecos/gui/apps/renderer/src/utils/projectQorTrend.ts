@@ -766,6 +766,12 @@ const QOR_METRIC_REGISTRY: Record<string, QorMetricDefinition> = {
     dimension: 'clock_robustness_dfm',
     polarity: 'lower_is_better',
   },
+  antenna_count: {
+    metricName: 'antenna_count',
+    displayName: 'Antenna Violations',
+    dimension: 'clock_robustness_dfm',
+    polarity: 'lower_is_better',
+  },
   rcx_spef_file_count: {
     metricName: 'rcx_spef_file_count',
     displayName: 'RCX SPEF File Count',

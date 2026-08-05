@@ -7,6 +7,7 @@ export const projectManifestFlowSteps = [
   'Legal',
   'Route',
   'DRC',
+  'Antenna',
   'Filler',
   'RCX',
   'STA',
@@ -38,6 +39,7 @@ export interface ProjectManifestMetricSummary {
   wns?: number
   tns?: number
   drc_count?: number
+  antenna_count?: number
   area?: number
   runtime_sec?: number
   [key: string]: unknown
@@ -178,6 +180,7 @@ const FLOW_STEP_ALIASES: Record<string, ProjectManifestFlowStep> = {
   route: 'Route',
   routing: 'Route',
   drc: 'DRC',
+  antenna: 'Antenna',
   filler: 'Filler',
   rcx: 'RCX',
   sta: 'STA',
@@ -221,6 +224,7 @@ export function createProjectManifestDraft(
         tns: 'maximize',
         area: 'minimize',
         drc_count: 'minimize',
+        antenna_count: 'minimize',
         power: 'minimize',
       },
     },

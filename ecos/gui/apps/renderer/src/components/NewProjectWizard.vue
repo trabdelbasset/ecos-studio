@@ -1440,6 +1440,7 @@ type FlowStepName =
   | 'legalization'
   | 'route'
   | 'drc'
+  | 'antenna'
   | 'filler'
   | 'RCX'
   | 'sta'
@@ -1573,6 +1574,7 @@ const hardenFlowSteps: Array<{ name: FlowStepName; description: string }> = [
   { name: 'legalization', description: 'Placement legalization.' },
   { name: 'route', description: 'Detailed routing.' },
   { name: 'drc', description: 'Design rule checking.' },
+  { name: 'antenna', description: 'Antenna effect checking.' },
   { name: 'filler', description: 'Filler insertion.' },
   { name: 'RCX', description: 'Parasitic extraction.' },
   { name: 'sta', description: 'Static timing analysis.' },
@@ -1839,6 +1841,7 @@ function normalizeFlowStepName(value: unknown, fallback: FlowStepName): FlowStep
     legalization: 'legalization',
     route: 'route',
     drc: 'drc',
+    antenna: 'antenna',
     filler: 'filler',
     rcx: 'RCX',
     sta: 'sta',
@@ -1855,6 +1858,7 @@ function normalizeFlowStepName(value: unknown, fallback: FlowStepName): FlowStep
     'legalization',
     'route',
     'drc',
+    'antenna',
     'filler',
     'RCX',
     'sta',

@@ -19,6 +19,9 @@ const RtStepConfigView = defineAsyncComponent(
 const DrcStepConfigView = defineAsyncComponent(
   () => import('./views/DrcStepConfigView.vue'),
 )
+const AntennaStepConfigView = defineAsyncComponent(
+  () => import('./views/AntennaStepConfigView.vue'),
+)
 const PlStepConfigView = defineAsyncComponent(
   () => import('./views/PlStepConfigView.vue'),
 )
@@ -30,6 +33,7 @@ const VIEW_MAP: Partial<Record<StepEnum, Component>> = {
   /** pl_default_config.json: root `PL` block — same schema as Placement / Legalization */
   [StepEnum.FILLER]: PlStepConfigView,
   [StepEnum.DRC]: DrcStepConfigView,
+  [StepEnum.ANTENNA]: AntennaStepConfigView,
   [StepEnum.PLACEMENT]: PlStepConfigView,
   [StepEnum.LEGALIZATION]: PlStepConfigView,
 }

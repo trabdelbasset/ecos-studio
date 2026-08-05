@@ -23,4 +23,5 @@ const STEP_TO_FLOW_CONFIG_PATH_KEY: Partial<Record<StepEnum, string>> = {
   [StepEnum.ROUTING]: 'irt_path',
   [StepEnum.FILLER]: 'irt_path',
   [StepEnum.DRC]: 'idrc_path',
+  [StepEnum.ANTENNA]: 'iantenna_path',
 }
