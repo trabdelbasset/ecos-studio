@@ -222,6 +222,20 @@ export class ProjectScopeService {
       techNode = '55nm'
       pdkId = 'ics55'
     } else if (
+      canonicalPath.toLowerCase().includes('ihp') ||
+      canonicalPath.toLowerCase().includes('sg13g2') ||
+      detectedFiles.directories.some(
+        (directory) => directory.includes('sg13g2') || directory.includes('ihp'),
+      ) ||
+      detectedFiles.files.some(
+        (file) => file.includes('sg13g2') || file.includes('ihp'),
+      )
+    ) {
+      name = 'IHP SG13G2 PDK'
+      description = 'IHP 130nm BiCMOS open-source PDK (auto-detected)'
+      techNode = '130nm'
+      pdkId = 'ihp130'
+    } else if (
       detectedFiles.directories.some((directory) => directory.startsWith('sky130'))
     ) {
       name = 'SkyWater SKY130 PDK'

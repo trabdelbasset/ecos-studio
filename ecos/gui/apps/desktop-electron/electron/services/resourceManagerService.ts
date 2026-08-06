@@ -146,6 +146,30 @@ const BUILTIN_MPCS: RegistryMpc[] = [
   },
 ]
 
+const BUILTIN_PDKS: RegistryPdk[] = [
+  {
+    id: 'ihp130',
+    display_name: 'IHP SG13G2 PDK',
+    description: 'IHP 130nm BiCMOS open-source PDK (SG13G2 technology)',
+    category: 'pdk',
+    homepage: 'https://github.com/IHP-GmbH/IHP-Open-PDK',
+    versions: [
+      {
+        version: '0.3.0',
+        platforms: {
+          [ALL_PLATFORM]: {
+            url: 'https://github.com/IHP-GmbH/IHP-Open-PDK/archive/refs/tags/v0.3.0.tar.gz',
+            sha256: '',
+            size: 0,
+            strip_prefix: 'IHP-Open-PDK-0.3.0',
+            post_install: [],
+          },
+        },
+      },
+    ],
+  },
+]
+
 const LEGACY_BUILTIN_MPC_ARCHIVE_URLS = new Set([
   'https://github.com/openecos-projects/mpc-frame/archive/cc47470b72537ba3f0726468f5d5e27d317d9706.tar.gz',
   BUILTIN_MPCS[0].versions[0].platforms[ALL_PLATFORM].url,
@@ -1972,7 +1996,11 @@ function withBuiltinMpcs(
   for (const mpc of BUILTIN_MPCS) {
     if (!mpcs.has(mpc.id)) mpcs.set(mpc.id, mpc)
   }
-  return { ...registry, mpcs: Array.from(mpcs.values()) }
+  const pdks = new Map(registry.pdks.map((pdk) => [pdk.id, pdk]))
+  for (const pdk of BUILTIN_PDKS) {
+    if (!pdks.has(pdk.id)) pdks.set(pdk.id, pdk)
+  }
+  return { ...registry, mpcs: Array.from(mpcs.values()), pdks: Array.from(pdks.values()) }
 }
 
 function createBuiltInMpcRegistry(registryUrl: string): ResourceRegistry | null {
@@ -2374,7 +2402,9 @@ async function scanPdkDirectory(path: string): Promise<{
     techNode = '55nm'
     pdkId = 'ics55'
   } else if (
-    files.some((file) => file.includes('sg13g2')) ||
+    canonicalPath.toLowerCase().includes('ihp') ||
+    canonicalPath.toLowerCase().includes('sg13g2') ||
+    files.some((file) => file.includes('sg13g2') || file.includes('ihp')) ||
     directories.some(
       (directory) => directory.includes('sg13g2') || directory.includes('ihp'),
     )

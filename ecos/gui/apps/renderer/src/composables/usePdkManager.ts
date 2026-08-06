@@ -203,6 +203,47 @@ export function usePdkManager() {
           await savePdks(desktopApi)
         }
       }
+
+      if (desktopApi?.resources) {
+        try {
+          const resourcePayload = await desktopApi.resources.list()
+          if (Array.isArray(resourcePayload?.resources)) {
+            let hasNewPdk = false
+            for (const res of resourcePayload.resources) {
+              if (
+                res.type === 'pdk' &&
+                res.path &&
+                (res.status === 'installed' || res.active || res.installed_version)
+              ) {
+                const normPath = normalizePdkPath(res.path)
+                const exists = importedPdks.value.some(
+                  (p) => normalizePdkPath(p.path) === normPath,
+                )
+                if (!exists) {
+                  try {
+                    const detected = await scanPdkDirectory(desktopApi, res.path)
+                    const pdk = buildImportedPdk(detected)
+                    importedPdks.value.push(pdk)
+                    hasNewPdk = true
+                  } catch (e) {
+                    console.warn(
+                      '[usePdkManager] Failed to auto-detect installed resource PDK:',
+                      res.path,
+                      e,
+                    )
+                  }
+                }
+              }
+            }
+            if (hasNewPdk) {
+              await savePdks(desktopApi)
+            }
+          }
+        } catch (err) {
+          console.warn('[usePdkManager] Error listing resource PDKs:', err)
+        }
+      }
+
       isLoaded.value = true
     } catch (error) {
       console.error('[usePdkManager] Load PDKs error:', error)
