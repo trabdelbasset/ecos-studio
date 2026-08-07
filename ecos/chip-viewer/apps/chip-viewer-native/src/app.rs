@@ -9372,7 +9372,7 @@ mod tests {
         let dir = temp_snapshot_dir("external-refresh-new-delta");
         write_empty_snapshot(&dir, false);
         let db = ChipViewDb::open(dir.join("geometry.manifest")).unwrap();
-        let mut loaded = LoadedViewer::new(db, false, false, None, None, None, None, None);
+        let mut loaded = LoadedViewer::new(db, false, false, None, None, None, None, None, None, None);
         let delta_path = dir.join("geometry.delta.bin");
 
         assert!(!loaded.snapshot_signature.files.contains_key(&delta_path));
@@ -9399,7 +9399,7 @@ mod tests {
         let dir = temp_snapshot_dir("restored-edit-session-dirty");
         write_empty_snapshot(&dir, false);
         let db = ChipViewDb::open(dir.join("geometry.manifest")).unwrap();
-        let loaded = LoadedViewer::new(db, true, true, None, None, None, None, None);
+        let loaded = LoadedViewer::new(db, true, true, None, None, None, None, None, None, None);
 
         assert!(loaded.session_dirty);
 
