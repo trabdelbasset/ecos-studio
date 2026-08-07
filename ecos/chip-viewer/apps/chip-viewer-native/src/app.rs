@@ -1170,7 +1170,10 @@ impl AntennaOverlay {
                     counts = json_counts;
                 }
                 Err(err) => {
-                    load_error = Some(format!("failed to load Antenna data {}: {err}", path.display()));
+                    load_error = Some(format!(
+                        "failed to load Antenna data {}: {err}",
+                        path.display()
+                    ));
                 }
             }
         }
@@ -1182,8 +1185,10 @@ impl AntennaOverlay {
             {
                 Ok(csv_counts) => merge_antenna_counts(&mut counts, csv_counts),
                 Err(err) => {
-                    let message =
-                        format!("failed to load Antenna statistics {}: {err}", path.display());
+                    let message = format!(
+                        "failed to load Antenna statistics {}: {err}",
+                        path.display()
+                    );
                     load_error = Some(match load_error {
                         Some(existing) => format!("{existing}; {message}"),
                         None => message,
@@ -1355,7 +1360,9 @@ fn merge_antenna_counts(
     }
 }
 
-fn antenna_counts_from_violations(violations: &[AntennaViolation]) -> BTreeMap<String, AntennaTypeCounts> {
+fn antenna_counts_from_violations(
+    violations: &[AntennaViolation],
+) -> BTreeMap<String, AntennaTypeCounts> {
     let mut counts = BTreeMap::<String, AntennaTypeCounts>::new();
     for violation in violations {
         let type_counts = counts.entry(violation.antenna_type.clone()).or_default();
@@ -1368,7 +1375,9 @@ fn antenna_counts_from_violations(violations: &[AntennaViolation]) -> BTreeMap<S
     counts
 }
 
-fn antenna_type_states_from_counts(counts: BTreeMap<String, AntennaTypeCounts>) -> Vec<AntennaTypeState> {
+fn antenna_type_states_from_counts(
+    counts: BTreeMap<String, AntennaTypeCounts>,
+) -> Vec<AntennaTypeState> {
     counts
         .into_iter()
         .filter(|(_, counts)| counts.total_count > 0 || !counts.layer_counts.is_empty())
@@ -1380,7 +1389,6 @@ fn antenna_type_states_from_counts(counts: BTreeMap<String, AntennaTypeCounts>) 
         })
         .collect()
 }
-
 
 fn json_i32(value: Option<&serde_json::Value>) -> Option<i32> {
     value
@@ -1514,7 +1522,10 @@ impl LoadedViewer {
     }
 
     fn has_analysis_panel(&self) -> bool {
-        self.drc_overlay.is_some() || self.antenna_overlay.is_some() || self.map_catalog.is_some() || self.map_catalog_error.is_some()
+        self.drc_overlay.is_some()
+            || self.antenna_overlay.is_some()
+            || self.map_catalog.is_some()
+            || self.map_catalog_error.is_some()
     }
 
     fn analysis_sidebar(&mut self, ui: &mut egui::Ui) {
@@ -1527,7 +1538,9 @@ impl LoadedViewer {
             if has_drc && analysis_tab_button(ui, "DRC", self.analysis_tab == AnalysisTab::Drc) {
                 self.analysis_tab = AnalysisTab::Drc;
             }
-            if has_antenna && analysis_tab_button(ui, "ANTENNA", self.analysis_tab == AnalysisTab::Antenna) {
+            if has_antenna
+                && analysis_tab_button(ui, "ANTENNA", self.analysis_tab == AnalysisTab::Antenna)
+            {
                 self.analysis_tab = AnalysisTab::Antenna;
             }
             if has_maps && analysis_tab_button(ui, "MAP", self.analysis_tab == AnalysisTab::Map) {
@@ -1536,7 +1549,7 @@ impl LoadedViewer {
         });
         ui.add_space(4.0);
         ui.separator();
-        
+
         let show_drc = self.analysis_tab == AnalysisTab::Drc && has_drc;
         let show_antenna = self.analysis_tab == AnalysisTab::Antenna && has_antenna;
         let show_map = self.analysis_tab == AnalysisTab::Map && has_maps;
@@ -1631,7 +1644,7 @@ impl LoadedViewer {
             });
     }
 
-fn antenna_sidebar(&mut self, ui: &mut egui::Ui) {
+    fn antenna_sidebar(&mut self, ui: &mut egui::Ui) {
         let visible_count = self.visible_antenna_violation_count(None);
         let Some(overlay) = &mut self.antenna_overlay else {
             return;
@@ -3618,7 +3631,7 @@ fn antenna_sidebar(&mut self, ui: &mut egui::Ui) {
             .unwrap_or(0)
     }
 
-fn visible_antenna_violation_count(&self, viewport: Option<Rect32>) -> usize {
+    fn visible_antenna_violation_count(&self, viewport: Option<Rect32>) -> usize {
         self.antenna_overlay
             .as_ref()
             .map(|overlay| {
@@ -3639,7 +3652,11 @@ fn visible_antenna_violation_count(&self, viewport: Option<Rect32>) -> usize {
         })
     }
 
-fn antenna_violation_is_visible(&self, violation: &AntennaViolation, viewport: Option<Rect32>) -> bool {
+    fn antenna_violation_is_visible(
+        &self,
+        violation: &AntennaViolation,
+        viewport: Option<Rect32>,
+    ) -> bool {
         self.antenna_overlay.as_ref().is_some_and(|overlay| {
             overlay.type_is_visible(&violation.antenna_type)
                 && self.antenna_layer_is_visible(&violation.layer)
@@ -3651,7 +3668,7 @@ fn antenna_violation_is_visible(&self, violation: &AntennaViolation, viewport: O
         drc_layer_is_visible(&self.layers, layer_name)
     }
 
-fn antenna_layer_is_visible(&self, layer_name: &str) -> bool {
+    fn antenna_layer_is_visible(&self, layer_name: &str) -> bool {
         antenna_layer_is_visible(&self.layers, layer_name)
     }
 
@@ -3832,7 +3849,7 @@ fn antenna_layer_is_visible(&self, layer_name: &str) -> bool {
             });
     }
 
-fn antenna_detail_overlay(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+    fn antenna_detail_overlay(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
         let Some(selected_id) = self.selected_drc else {
             return;
         };
