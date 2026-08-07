@@ -71,15 +71,36 @@ export interface ConfigData {
 
 // ============ 工具函数 ============
 
-/** ICS55 routing is pinned to the MET2 through MET5 route window. */
-const FIXED_BOTTOM_LAYER = 'MET2'
-const FIXED_TOP_LAYER = 'MET5'
-const ROUTING_LAYER_ORDER = [FIXED_BOTTOM_LAYER, 'MET3', 'MET4', FIXED_TOP_LAYER]
+export interface PdkProfile {
+  bottomLayer: string
+  topLayer: string
+  layerOrder: string[]
+}
+
+export const PDK_PROFILES: Record<string, PdkProfile> = {
+  ics55: {
+    bottomLayer: 'MET2',
+    topLayer: 'MET5',
+    layerOrder: ['MET1', 'MET2', 'MET3', 'MET4', 'MET5', 'MET6'],
+  },
+  ihp130: {
+    bottomLayer: 'Metal2',
+    topLayer: 'Metal5',
+    layerOrder: ['Metal1', 'Metal2', 'Metal3', 'Metal4', 'Metal5'],
+  },
+}
+
+export function getPdkProfile(pdkId?: string): PdkProfile {
+  const id = pdkId?.toLowerCase() ?? 'ics55'
+  return PDK_PROFILES[id] ?? PDK_PROFILES.ics55
+}
+
 const FLOW_RUNNING_SAVE_BLOCKED_MESSAGE =
   'Flow is running. Configuration is read-only until the current run finishes.'
 const RUNNING_FLOW_PARAMETERS_POLL_MS = 1600
 
 function getDefaultConfig(): ConfigData {
+  const profile = getPdkProfile('')
   return {
     pdk: '',
     pdkRoot: '',
@@ -102,8 +123,8 @@ function getDefaultConfig(): ConfigData {
     routabilityOptFlag: true,
     clock: '',
     frequencyMax: 100,
-    bottomLayer: FIXED_BOTTOM_LAYER,
-    topLayer: FIXED_TOP_LAYER,
+    bottomLayer: profile.bottomLayer,
+    topLayer: profile.topLayer,
   }
 }
 
@@ -156,8 +177,10 @@ function normalizeCore(c: unknown): ParametersData['Core'] {
 
 export function parseParametersData(fileContent: string): ParametersData {
   const raw = JSON.parse(fileContent) as Record<string, unknown>
+  const pdkId = String(raw.PDK ?? '')
+  const profile = getPdkProfile(pdkId)
   return {
-    PDK: String(raw.PDK ?? ''),
+    PDK: pdkId,
     Design: String(raw.Design ?? ''),
     'Top module': String(raw['Top module'] ?? ''),
     Die: normalizeDie(raw.Die),
@@ -170,13 +193,14 @@ export function parseParametersData(fileContent: string): ParametersData {
     'Routability opt flag': Number(raw['Routability opt flag'] ?? 1),
     Clock: String(raw.Clock ?? ''),
     'Frequency max [MHz]': Number(raw['Frequency max [MHz]'] ?? 100),
-    'Bottom layer': String(raw['Bottom layer'] ?? FIXED_BOTTOM_LAYER),
-    'Top layer': String(raw['Top layer'] ?? FIXED_TOP_LAYER),
+    'Bottom layer': String(raw['Bottom layer'] ?? profile.bottomLayer),
+    'Top layer': String(raw['Top layer'] ?? profile.topLayer),
     'PDK Root': raw['PDK Root'] != null ? String(raw['PDK Root']) : undefined,
   }
 }
 
 export function transformParametersToConfig(data: ParametersData): ConfigData {
+  const profile = getPdkProfile(data.PDK)
   return {
     pdk: data.PDK || '',
     pdkRoot: data['PDK Root'] ?? '',
@@ -202,8 +226,8 @@ export function transformParametersToConfig(data: ParametersData): ConfigData {
     routabilityOptFlag: !!data['Routability opt flag'],
     clock: data.Clock || '',
     frequencyMax: data['Frequency max [MHz]'] ?? 100,
-    bottomLayer: FIXED_BOTTOM_LAYER,
-    topLayer: FIXED_TOP_LAYER,
+    bottomLayer: data['Bottom layer'] ?? profile.bottomLayer,
+    topLayer: data['Top layer'] ?? profile.topLayer,
   }
 }
 
@@ -232,8 +256,8 @@ export function transformConfigToParameters(config: ConfigData): ParametersData 
     'Routability opt flag': config.routabilityOptFlag ? 1 : 0,
     Clock: config.clock,
     'Frequency max [MHz]': config.frequencyMax,
-    'Bottom layer': FIXED_BOTTOM_LAYER,
-    'Top layer': FIXED_TOP_LAYER,
+    'Bottom layer': config.bottomLayer,
+    'Top layer': config.topLayer,
   }
   out['PDK Root'] = config.pdkRoot ?? ''
   return out
@@ -714,7 +738,8 @@ export function useParameters() {
   }
 
   const layerOptions = computed(() => {
-    return ROUTING_LAYER_ORDER.map((layer) => ({ label: layer, value: layer }))
+    const profile = getPdkProfile(config.pdk)
+    return profile.layerOrder.map((layer) => ({ label: layer, value: layer }))
   })
 
   const layersList = computed(() => {
