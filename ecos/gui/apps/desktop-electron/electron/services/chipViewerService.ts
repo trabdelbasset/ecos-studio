@@ -190,6 +190,8 @@ interface SnapshotInputs {
   defPath: string
   drcDataPath?: string
   drcStatisPath?: string
+  antennaDataPath?: string
+  antennaStatisPath?: string
   editCommandDirectory: string
   editResultDirectory: string
   gdsPath: string
@@ -612,6 +614,12 @@ export class ChipViewerService {
     if (snapshotInputs.drcStatisPath) {
       viewerArgs.push('--drc-statis', snapshotInputs.drcStatisPath)
     }
+    if (snapshotInputs.antennaDataPath) {
+      viewerArgs.push('--antenna-data', snapshotInputs.antennaDataPath)
+    }
+    if (snapshotInputs.antennaStatisPath) {
+      viewerArgs.push('--antenna-statis', snapshotInputs.antennaStatisPath)
+    }
     if (snapshotInputs.mapRootPath) {
       viewerArgs.push('--map-root', snapshotInputs.mapRootPath)
     }
@@ -718,9 +726,14 @@ export class ChipViewerService {
     // command/result transport outside that published artifact tree.
     const editDirectory = join(workspaceStepDirectory, '.chip-viewer', 'layout-edit')
     const drcDataPath = join(workspaceStepDirectory, 'feature', 'drc.step.json')
+    const antennaDataPath = join(workspaceStepDirectory, 'feature', 'antenna.step.json')
     const drcStatisPath = join(workspaceStepDirectory, 'analysis', 'drc_statis.csv')
     const mapRootPath = join(workspaceStepDirectory, 'feature')
     const isDrcStep = isDrcWorkspaceStep(step, stepLabel, workspaceStepDirectory)
+    const isAntennaStep =
+      step === 'antenna' ||
+      stepLabel.toLowerCase() === 'antenna' ||
+      step.toLowerCase().startsWith('antenna_')
 
     return {
       dbPath,
@@ -728,6 +741,9 @@ export class ChipViewerService {
       drcDataPath: isDrcStep && this.fileExists(drcDataPath) ? drcDataPath : undefined,
       drcStatisPath:
         isDrcStep && this.fileExists(drcStatisPath) ? drcStatisPath : undefined,
+      antennaDataPath:
+        isAntennaStep && this.fileExists(antennaDataPath) ? antennaDataPath : undefined,
+      antennaStatisPath: undefined,
       editCommandDirectory: join(editDirectory, 'commands'),
       editResultDirectory: join(editDirectory, 'results'),
       gdsPath,

@@ -62,6 +62,8 @@ struct LoadingViewer {
     edit_result_dir: Option<PathBuf>,
     drc_data_path: Option<PathBuf>,
     drc_statis_path: Option<PathBuf>,
+    antenna_data_path: Option<PathBuf>,
+    antenna_statis_path: Option<PathBuf>,
     map_root_path: Option<PathBuf>,
 }
 
@@ -97,6 +99,8 @@ struct LoadedViewer {
     next_command_counter: u32,
     drc_overlay: Option<DrcOverlay>,
     selected_drc: Option<usize>,
+    antenna_overlay: Option<AntennaOverlay>,
+    selected_antenna: Option<usize>,
     map_catalog: Option<MapCatalog>,
     map_catalog_error: Option<String>,
     analysis_tab: AnalysisTab,
@@ -154,8 +158,17 @@ struct DrcOverlay {
     load_error: Option<String>,
 }
 
+struct AntennaOverlay {
+    data_path: Option<PathBuf>,
+    statis_path: Option<PathBuf>,
+    type_states: Vec<AntennaTypeState>,
+    violations: Vec<AntennaViolation>,
+    load_error: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnalysisTab {
+    Antenna,
     Drc,
     Map,
 }
@@ -205,6 +218,31 @@ struct DrcTypeCounts {
 struct DrcViolation {
     id: usize,
     drc_type: String,
+    layer: String,
+    bbox: Rect32,
+    required_size: Option<i64>,
+    nets: Vec<String>,
+    insts: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AntennaTypeState {
+    name: String,
+    total_count: usize,
+    layer_counts: BTreeMap<String, usize>,
+    visible: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AntennaTypeCounts {
+    total_count: usize,
+    layer_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AntennaViolation {
+    id: usize,
+    antenna_type: String,
     layer: String,
     bbox: Rect32,
     required_size: Option<i64>,
@@ -762,6 +800,8 @@ impl ChipViewerApp {
         initial_session_dirty: bool,
         drc_data_path: Option<PathBuf>,
         drc_statis_path: Option<PathBuf>,
+        antenna_data_path: Option<PathBuf>,
+        antenna_statis_path: Option<PathBuf>,
         map_root_path: Option<PathBuf>,
     ) -> Self {
         let edit_enabled = mode == "edit";
@@ -782,6 +822,8 @@ impl ChipViewerApp {
                 edit_result_dir,
                 drc_data_path,
                 drc_statis_path,
+                antenna_data_path,
+                antenna_statis_path,
                 map_root_path,
             }),
             theme_initialized: false,
@@ -853,6 +895,8 @@ impl ChipViewerApp {
                     loading.edit_result_dir.clone(),
                     loading.drc_data_path.clone(),
                     loading.drc_statis_path.clone(),
+                    loading.antenna_data_path.clone(),
+                    loading.antenna_statis_path.clone(),
                     loading.map_root_path.clone(),
                 ))),
                 Ok(Err(err)) => Some(ViewerState::Error(err)),
@@ -1106,6 +1150,238 @@ fn drc_type_states_from_counts(counts: BTreeMap<String, DrcTypeCounts>) -> Vec<D
         .collect()
 }
 
+impl AntennaOverlay {
+    fn load(data_path: Option<PathBuf>, statis_path: Option<PathBuf>) -> Option<Self> {
+        if data_path.is_none() && statis_path.is_none() {
+            return None;
+        }
+
+        let mut load_error = None;
+        let mut violations = Vec::new();
+        let mut counts = BTreeMap::new();
+
+        if let Some(path) = data_path.as_deref() {
+            match fs::read_to_string(path)
+                .map_err(|err| err.to_string())
+                .and_then(|text| parse_antenna_json_text(&text))
+            {
+                Ok((json_violations, json_counts)) => {
+                    violations = json_violations;
+                    counts = json_counts;
+                }
+                Err(err) => {
+                    load_error = Some(format!("failed to load Antenna data {}: {err}", path.display()));
+                }
+            }
+        }
+
+        if let Some(path) = statis_path.as_deref() {
+            match fs::read_to_string(path)
+                .map_err(|err| err.to_string())
+                .map(|text| parse_antenna_statis_csv(&text))
+            {
+                Ok(csv_counts) => merge_antenna_counts(&mut counts, csv_counts),
+                Err(err) => {
+                    let message =
+                        format!("failed to load Antenna statistics {}: {err}", path.display());
+                    load_error = Some(match load_error {
+                        Some(existing) => format!("{existing}; {message}"),
+                        None => message,
+                    });
+                }
+            }
+        }
+
+        merge_antenna_counts(&mut counts, antenna_counts_from_violations(&violations));
+        let type_states = antenna_type_states_from_counts(counts);
+
+        Some(Self {
+            data_path,
+            statis_path,
+            type_states,
+            violations,
+            load_error,
+        })
+    }
+
+    fn total_count(&self) -> usize {
+        self.type_states.iter().map(|state| state.total_count).sum()
+    }
+
+    fn selected_type_count(&self) -> usize {
+        self.type_states
+            .iter()
+            .filter(|state| state.visible)
+            .count()
+    }
+
+    fn set_all_visible(&mut self, visible: bool) {
+        for state in &mut self.type_states {
+            state.visible = visible;
+        }
+    }
+
+    fn type_is_visible(&self, antenna_type: &str) -> bool {
+        self.type_states
+            .iter()
+            .find(|state| state.name == antenna_type)
+            .is_some_and(|state| state.visible)
+    }
+}
+
+fn parse_antenna_json_text(
+    text: &str,
+) -> Result<(Vec<AntennaViolation>, BTreeMap<String, AntennaTypeCounts>), String> {
+    let root: serde_json::Value = serde_json::from_str(text).map_err(|err| err.to_string())?;
+    let Some(distribution) = root
+        .get("antenna")
+        .and_then(|node| node.get("distribution"))
+        .and_then(|node| node.as_object())
+    else {
+        return Ok((Vec::new(), BTreeMap::new()));
+    };
+
+    let mut violations = Vec::new();
+    let mut counts = BTreeMap::new();
+    for (antenna_type, type_node) in distribution {
+        let mut type_counts = AntennaTypeCounts {
+            total_count: json_usize(type_node.get("number")).unwrap_or(0),
+            layer_counts: BTreeMap::new(),
+        };
+        if let Some(layers) = type_node.get("layers").and_then(|node| node.as_object()) {
+            for (layer, layer_node) in layers {
+                let layer_count = json_usize(layer_node.get("number")).unwrap_or(0);
+                if layer_count > 0 {
+                    type_counts.layer_counts.insert(layer.clone(), layer_count);
+                }
+                if let Some(list) = layer_node.get("list").and_then(|node| node.as_array()) {
+                    for item in list {
+                        if let Some(violation) =
+                            parse_antenna_violation(item, violations.len(), antenna_type, layer)
+                        {
+                            violations.push(violation);
+                        }
+                    }
+                }
+            }
+        }
+        if type_counts.total_count == 0 {
+            type_counts.total_count = type_counts.layer_counts.values().sum();
+        }
+        counts.insert(antenna_type.clone(), type_counts);
+    }
+
+    Ok((violations, counts))
+}
+
+fn parse_antenna_violation(
+    node: &serde_json::Value,
+    id: usize,
+    antenna_type: &str,
+    layer: &str,
+) -> Option<AntennaViolation> {
+    let llx = json_i32(node.get("llx"))?;
+    let lly = json_i32(node.get("lly"))?;
+    let urx = json_i32(node.get("urx"))?;
+    let ury = json_i32(node.get("ury"))?;
+    Some(AntennaViolation {
+        id,
+        antenna_type: antenna_type.to_string(),
+        layer: layer.to_string(),
+        bbox: Rect32 {
+            lx: llx.min(urx),
+            ly: lly.min(ury),
+            hx: llx.max(urx),
+            hy: lly.max(ury),
+        },
+        required_size: json_i64(node.get("required_size")),
+        nets: json_string_vec(node.get("net")),
+        insts: json_string_vec(node.get("inst")),
+    })
+}
+
+fn parse_antenna_statis_csv(text: &str) -> BTreeMap<String, AntennaTypeCounts> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(header_line) = lines.next() else {
+        return BTreeMap::new();
+    };
+    let headers = split_simple_csv_line(header_line);
+    if headers.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let mut counts = BTreeMap::new();
+    for line in lines {
+        let fields = split_simple_csv_line(line);
+        if fields.is_empty() {
+            continue;
+        }
+        let antenna_type = fields[0].trim();
+        if antenna_type.is_empty() || antenna_type.eq_ignore_ascii_case("total") {
+            continue;
+        }
+        let mut type_counts = AntennaTypeCounts::default();
+        for (index, header) in headers.iter().enumerate().skip(1) {
+            let value = fields
+                .get(index)
+                .and_then(|field| field.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if header.eq_ignore_ascii_case("total") {
+                type_counts.total_count = value;
+            } else if value > 0 {
+                type_counts.layer_counts.insert(header.clone(), value);
+            }
+        }
+        if type_counts.total_count == 0 {
+            type_counts.total_count = type_counts.layer_counts.values().sum();
+        }
+        counts.insert(antenna_type.to_string(), type_counts);
+    }
+    counts
+}
+
+fn merge_antenna_counts(
+    target: &mut BTreeMap<String, AntennaTypeCounts>,
+    source: BTreeMap<String, AntennaTypeCounts>,
+) {
+    for (antenna_type, source_counts) in source {
+        let target_counts = target.entry(antenna_type).or_default();
+        if target_counts.total_count == 0 {
+            target_counts.total_count = source_counts.total_count;
+        }
+        for (layer, count) in source_counts.layer_counts {
+            target_counts.layer_counts.entry(layer).or_insert(count);
+        }
+    }
+}
+
+fn antenna_counts_from_violations(violations: &[AntennaViolation]) -> BTreeMap<String, AntennaTypeCounts> {
+    let mut counts = BTreeMap::<String, AntennaTypeCounts>::new();
+    for violation in violations {
+        let type_counts = counts.entry(violation.antenna_type.clone()).or_default();
+        type_counts.total_count += 1;
+        *type_counts
+            .layer_counts
+            .entry(violation.layer.clone())
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+fn antenna_type_states_from_counts(counts: BTreeMap<String, AntennaTypeCounts>) -> Vec<AntennaTypeState> {
+    counts
+        .into_iter()
+        .filter(|(_, counts)| counts.total_count > 0 || !counts.layer_counts.is_empty())
+        .map(|(name, counts)| AntennaTypeState {
+            name,
+            total_count: counts.total_count,
+            layer_counts: counts.layer_counts,
+            visible: true,
+        })
+        .collect()
+}
+
+
 fn json_i32(value: Option<&serde_json::Value>) -> Option<i32> {
     value
         .and_then(|value| value.as_i64())
@@ -1147,6 +1423,8 @@ impl LoadedViewer {
         edit_result_dir: Option<PathBuf>,
         drc_data_path: Option<PathBuf>,
         drc_statis_path: Option<PathBuf>,
+        antenna_data_path: Option<PathBuf>,
+        antenna_statis_path: Option<PathBuf>,
         map_root_path: Option<PathBuf>,
     ) -> Self {
         let stats = db.stats();
@@ -1155,6 +1433,7 @@ impl LoadedViewer {
         let drawing_category_counts = drawing_category_counts(&db);
         let layers = layer_ui_states(&db, &BTreeMap::new());
         let drc_overlay = DrcOverlay::load(drc_data_path, drc_statis_path);
+        let antenna_overlay = AntennaOverlay::load(antenna_data_path, antenna_statis_path);
         let (map_catalog, map_catalog_error) = match map_root_path.as_deref() {
             Some(root) => match MapCatalog::discover(root) {
                 Ok(catalog) if !catalog.is_empty() => (Some(catalog), None),
@@ -1165,6 +1444,8 @@ impl LoadedViewer {
         };
         let analysis_tab = if drc_overlay.is_some() {
             AnalysisTab::Drc
+        } else if antenna_overlay.is_some() {
+            AnalysisTab::Antenna
         } else {
             AnalysisTab::Map
         };
@@ -1206,6 +1487,8 @@ impl LoadedViewer {
             next_command_counter: 1,
             drc_overlay,
             selected_drc: None,
+            antenna_overlay,
+            selected_antenna: None,
             map_catalog,
             map_catalog_error,
             analysis_tab,
@@ -1231,11 +1514,12 @@ impl LoadedViewer {
     }
 
     fn has_analysis_panel(&self) -> bool {
-        self.drc_overlay.is_some() || self.map_catalog.is_some() || self.map_catalog_error.is_some()
+        self.drc_overlay.is_some() || self.antenna_overlay.is_some() || self.map_catalog.is_some() || self.map_catalog_error.is_some()
     }
 
     fn analysis_sidebar(&mut self, ui: &mut egui::Ui) {
         let has_drc = self.drc_overlay.is_some();
+        let has_antenna = self.antenna_overlay.is_some();
         let has_maps = self.map_catalog.is_some() || self.map_catalog_error.is_some();
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -1243,17 +1527,32 @@ impl LoadedViewer {
             if has_drc && analysis_tab_button(ui, "DRC", self.analysis_tab == AnalysisTab::Drc) {
                 self.analysis_tab = AnalysisTab::Drc;
             }
+            if has_antenna && analysis_tab_button(ui, "ANTENNA", self.analysis_tab == AnalysisTab::Antenna) {
+                self.analysis_tab = AnalysisTab::Antenna;
+            }
             if has_maps && analysis_tab_button(ui, "MAP", self.analysis_tab == AnalysisTab::Map) {
                 self.analysis_tab = AnalysisTab::Map;
             }
         });
         ui.add_space(4.0);
         ui.separator();
-        match self.analysis_tab {
-            AnalysisTab::Drc if has_drc => self.drc_sidebar(ui),
-            AnalysisTab::Map if has_maps => self.map_sidebar(ui),
-            AnalysisTab::Drc => self.map_sidebar(ui),
-            AnalysisTab::Map => self.drc_sidebar(ui),
+        
+        let show_drc = self.analysis_tab == AnalysisTab::Drc && has_drc;
+        let show_antenna = self.analysis_tab == AnalysisTab::Antenna && has_antenna;
+        let show_map = self.analysis_tab == AnalysisTab::Map && has_maps;
+
+        if show_drc {
+            self.drc_sidebar(ui);
+        } else if show_antenna {
+            self.antenna_sidebar(ui);
+        } else if show_map {
+            self.map_sidebar(ui);
+        } else if has_drc {
+            self.drc_sidebar(ui);
+        } else if has_antenna {
+            self.antenna_sidebar(ui);
+        } else if has_maps {
+            self.map_sidebar(ui);
         }
     }
 
@@ -1327,6 +1626,81 @@ impl LoadedViewer {
             .show(ui, |ui| {
                 for state in &mut overlay.type_states {
                     drc_type_card(ui, state);
+                    ui.add_space(8.0);
+                }
+            });
+    }
+
+fn antenna_sidebar(&mut self, ui: &mut egui::Ui) {
+        let visible_count = self.visible_antenna_violation_count(None);
+        let Some(overlay) = &mut self.antenna_overlay else {
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            section_heading(ui, "VIOLATIONS");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{visible_count}/{}", overlay.total_count()))
+                        .small()
+                        .color(ecos_text_secondary()),
+                );
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui.small_button("All").clicked() {
+                overlay.set_all_visible(true);
+            }
+            if ui.small_button("None").clicked() {
+                overlay.set_all_visible(false);
+                self.selected_drc = None;
+            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} / {} types",
+                    overlay.selected_type_count(),
+                    overlay.type_states.len()
+                ))
+                .small()
+                .color(ecos_text_secondary()),
+            );
+        });
+
+        if let Some(err) = &overlay.load_error {
+            ui.add_space(6.0);
+            ui.colored_label(ecos_warning(), err);
+        }
+
+        ui.add_space(6.0);
+        if overlay.type_states.is_empty() {
+            ui.label(
+                egui::RichText::new("No Antenna violations")
+                    .color(ecos_text_secondary())
+                    .size(13.0),
+            );
+            if let Some(path) = overlay.data_path.as_deref() {
+                ui.label(
+                    egui::RichText::new(path.display().to_string())
+                        .small()
+                        .color(ecos_text_secondary()),
+                );
+            }
+            if let Some(path) = overlay.statis_path.as_deref() {
+                ui.label(
+                    egui::RichText::new(path.display().to_string())
+                        .small()
+                        .color(ecos_text_secondary()),
+                );
+            }
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("chip_viewer_antenna_type_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for state in &mut overlay.type_states {
+                    antenna_type_card(ui, state);
                     ui.add_space(8.0);
                 }
             });
@@ -2261,6 +2635,24 @@ impl LoadedViewer {
             }
         }
 
+        if let Some(overlay) = &self.antenna_overlay {
+            for violation in &overlay.violations {
+                if self.antenna_violation_is_visible(violation, Some(viewport)) {
+                    if paint_antenna_violation_overlay(
+                        &painter,
+                        violation,
+                        world,
+                        canvas,
+                        self.zoom,
+                        self.pan,
+                        self.selected_antenna == Some(violation.id),
+                    ) {
+                        drawn += 1;
+                    }
+                }
+            }
+        }
+
         if self.analysis_tab == AnalysisTab::Map {
             if let Some(bbox) = self.selected_map_bbox {
                 paint_map_selection_overlay(&painter, bbox, world, canvas, self.zoom, self.pan);
@@ -2349,6 +2741,7 @@ impl LoadedViewer {
         }
         self.canvas_info_overlay(ui, canvas);
         self.drc_detail_overlay(ui, canvas);
+        self.antenna_detail_overlay(ui, canvas);
         self.map_heatmap_overlay(ui, canvas);
     }
 
@@ -3225,6 +3618,19 @@ impl LoadedViewer {
             .unwrap_or(0)
     }
 
+fn visible_antenna_violation_count(&self, viewport: Option<Rect32>) -> usize {
+        self.antenna_overlay
+            .as_ref()
+            .map(|overlay| {
+                overlay
+                    .violations
+                    .iter()
+                    .filter(|violation| self.antenna_violation_is_visible(violation, viewport))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     fn drc_violation_is_visible(&self, violation: &DrcViolation, viewport: Option<Rect32>) -> bool {
         self.drc_overlay.as_ref().is_some_and(|overlay| {
             overlay.type_is_visible(&violation.drc_type)
@@ -3233,8 +3639,20 @@ impl LoadedViewer {
         })
     }
 
+fn antenna_violation_is_visible(&self, violation: &AntennaViolation, viewport: Option<Rect32>) -> bool {
+        self.antenna_overlay.as_ref().is_some_and(|overlay| {
+            overlay.type_is_visible(&violation.antenna_type)
+                && self.antenna_layer_is_visible(&violation.layer)
+                && viewport.is_none_or(|viewport| violation.bbox.intersects(viewport))
+        })
+    }
+
     fn drc_layer_is_visible(&self, layer_name: &str) -> bool {
         drc_layer_is_visible(&self.layers, layer_name)
+    }
+
+fn antenna_layer_is_visible(&self, layer_name: &str) -> bool {
+        antenna_layer_is_visible(&self.layers, layer_name)
     }
 
     fn shape_is_drawn_at_current_zoom(&self, shape: &ShapeRecord) -> bool {
@@ -3403,6 +3821,79 @@ impl LoadedViewer {
                         });
                         egui::ScrollArea::vertical()
                             .id_salt("chip_viewer_drc_detail_scroll")
+                            .max_height(popup_height - 52.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for line in lines {
+                                    info_panel_label(ui, line);
+                                }
+                            });
+                    });
+            });
+    }
+
+fn antenna_detail_overlay(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        let Some(selected_id) = self.selected_drc else {
+            return;
+        };
+        let Some(violation) = self.antenna_overlay.as_ref().and_then(|overlay| {
+            overlay
+                .violations
+                .iter()
+                .find(|item| item.id == selected_id)
+        }) else {
+            self.selected_drc = None;
+            return;
+        };
+        let title = format!("{} / {}", violation.antenna_type, violation.layer);
+        let lines = antenna_detail_lines(violation);
+
+        let ctx = ui.ctx().clone();
+        let popup_width = (canvas.width() * 0.34)
+            .clamp(340.0, 480.0)
+            .min((canvas.width() - 24.0).max(220.0));
+        let popup_height = (canvas.height() * 0.3)
+            .clamp(190.0, 280.0)
+            .min((canvas.height() - 24.0).max(150.0));
+        let popup_pos = egui::pos2(
+            canvas.left() + 12.0,
+            (canvas.bottom() - popup_height - 12.0).max(canvas.top() + 12.0),
+        );
+
+        egui::Area::new(egui::Id::new("chip_viewer_antenna_detail_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(popup_pos)
+            .show(&ctx, |ui| {
+                ui.set_width(popup_width);
+                egui::Frame::NONE
+                    .fill(ecos_panel())
+                    .stroke(egui::Stroke::new(1.0, antenna_overlay_primary_color()))
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2(popup_width - 20.0, popup_height - 20.0));
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .strong()
+                                    .size(14.0)
+                                    .color(ecos_text_primary()),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Hide Antenna detail")
+                                        .clicked()
+                                    {
+                                        self.selected_drc = None;
+                                    }
+                                },
+                            );
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("chip_viewer_antenna_detail_scroll")
                             .max_height(popup_height - 52.0)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
@@ -3929,7 +4420,61 @@ fn drc_type_card(ui: &mut egui::Ui, state: &mut DrcTypeState) {
         });
 }
 
+fn antenna_type_card(ui: &mut egui::Ui, state: &mut AntennaTypeState) {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(30, 30, 34))
+        .stroke(egui::Stroke::new(1.0, ecos_border()))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.visible, "");
+                ui.label(
+                    egui::RichText::new(&state.name)
+                        .strong()
+                        .size(13.5)
+                        .color(ecos_text_primary()),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(state.total_count.to_string())
+                            .size(12.5)
+                            .color(ecos_info_text()),
+                    );
+                });
+            });
+            let layer_summary = antenna_layer_counts_summary(&state.layer_counts);
+            if !layer_summary.is_empty() {
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(layer_summary)
+                        .small()
+                        .color(ecos_text_secondary()),
+                );
+            }
+        });
+}
+
 fn drc_layer_counts_summary(layer_counts: &BTreeMap<String, usize>) -> String {
+    const MAX_LAYER_SUMMARY_ITEMS: usize = 6;
+    let mut parts = layer_counts
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .take(MAX_LAYER_SUMMARY_ITEMS)
+        .map(|(layer, count)| format!("{layer}: {count}"))
+        .collect::<Vec<_>>();
+    let omitted = layer_counts
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .count()
+        .saturating_sub(MAX_LAYER_SUMMARY_ITEMS);
+    if omitted > 0 {
+        parts.push(format!("+{omitted} layers"));
+    }
+    parts.join("  ")
+}
+
+fn antenna_layer_counts_summary(layer_counts: &BTreeMap<String, usize>) -> String {
     const MAX_LAYER_SUMMARY_ITEMS: usize = 6;
     let mut parts = layer_counts
         .iter()
@@ -4689,12 +5234,33 @@ fn drc_overlay_primary_color() -> egui::Color32 {
     egui::Color32::from_rgb(250, 250, 255)
 }
 
+fn antenna_overlay_primary_color() -> egui::Color32 {
+    egui::Color32::from_rgb(250, 250, 255)
+}
+
 fn drc_overlay_secondary_color() -> egui::Color32 {
+    egui::Color32::from_rgb(0, 191, 165)
+}
+
+fn antenna_overlay_secondary_color() -> egui::Color32 {
     egui::Color32::from_rgb(0, 191, 165)
 }
 
 fn drc_violation_screen_rect(
     violation: &DrcViolation,
+    world: Rect32,
+    canvas: egui::Rect,
+    zoom: f32,
+    pan: egui::Vec2,
+) -> egui::Rect {
+    expand_screen_rect_to_min_size(
+        world_to_screen_rect(violation.bbox, world, canvas, zoom, pan),
+        8.0,
+    )
+}
+
+fn antenna_violation_screen_rect(
+    violation: &AntennaViolation,
     world: Rect32,
     canvas: egui::Rect,
     zoom: f32,
@@ -4736,9 +5302,60 @@ fn paint_drc_violation_overlay(
     true
 }
 
+fn paint_antenna_violation_overlay(
+    painter: &egui::Painter,
+    violation: &AntennaViolation,
+    world: Rect32,
+    canvas: egui::Rect,
+    zoom: f32,
+    pan: egui::Vec2,
+    selected: bool,
+) -> bool {
+    let rect = antenna_violation_screen_rect(violation, world, canvas, zoom, pan);
+    if !rect.intersects(canvas) {
+        return false;
+    }
+
+    let stroke = egui::Stroke::new(
+        if selected { 4.0 } else { 3.0 },
+        if selected {
+            antenna_overlay_secondary_color()
+        } else {
+            antenna_overlay_primary_color()
+        },
+    );
+    let inner_stroke = egui::Stroke::new(1.5, antenna_overlay_primary_color());
+    let rect = rect.expand(1.5);
+    painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+    painter.line_segment([rect.left_top(), rect.right_bottom()], inner_stroke);
+    painter.line_segment([rect.left_bottom(), rect.right_top()], inner_stroke);
+    true
+}
+
 fn drc_detail_lines(violation: &DrcViolation) -> Vec<String> {
     let mut lines = vec![
         format!("type: {}", violation.drc_type),
+        format!("layer: {}", violation.layer),
+        format!(
+            "bbox: ({}, {}) - ({}, {})",
+            violation.bbox.lx, violation.bbox.ly, violation.bbox.hx, violation.bbox.hy
+        ),
+    ];
+    if let Some(required_size) = violation.required_size {
+        lines.push(format!("required size: {required_size}"));
+    }
+    if !violation.nets.is_empty() {
+        lines.push(format!("nets: {}", violation.nets.join(", ")));
+    }
+    if !violation.insts.is_empty() {
+        lines.push(format!("instances: {}", violation.insts.join(", ")));
+    }
+    lines
+}
+
+fn antenna_detail_lines(violation: &AntennaViolation) -> Vec<String> {
+    let mut lines = vec![
+        format!("type: {}", violation.antenna_type),
         format!("layer: {}", violation.layer),
         format!(
             "bbox: ({}, {}) - ({}, {})",
@@ -6236,6 +6853,14 @@ fn visible_layer_count(layers: &[LayerUiState]) -> usize {
 }
 
 fn drc_layer_is_visible(layers: &[LayerUiState], layer_name: &str) -> bool {
+    layers
+        .iter()
+        .find(|layer| layer.name.eq_ignore_ascii_case(layer_name))
+        .map(|layer| layer.visible)
+        .unwrap_or(true)
+}
+
+fn antenna_layer_is_visible(layers: &[LayerUiState], layer_name: &str) -> bool {
     layers
         .iter()
         .find(|layer| layer.name.eq_ignore_ascii_case(layer_name))

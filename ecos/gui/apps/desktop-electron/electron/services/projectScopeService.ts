@@ -227,9 +227,7 @@ export class ProjectScopeService {
       detectedFiles.directories.some(
         (directory) => directory.includes('sg13g2') || directory.includes('ihp'),
       ) ||
-      detectedFiles.files.some(
-        (file) => file.includes('sg13g2') || file.includes('ihp'),
-      )
+      detectedFiles.files.some((file) => file.includes('sg13g2') || file.includes('ihp'))
     ) {
       name = 'IHP SG13G2 PDK'
       description = 'IHP 130nm BiCMOS open-source PDK (auto-detected)'

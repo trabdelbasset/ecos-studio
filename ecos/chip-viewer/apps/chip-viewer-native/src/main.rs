@@ -31,6 +31,12 @@ struct Args {
     drc_statis: Option<PathBuf>,
 
     #[arg(long)]
+    antenna_data: Option<PathBuf>,
+
+    #[arg(long)]
+    antenna_statis: Option<PathBuf>,
+
+    #[arg(long)]
     map_root: Option<PathBuf>,
 }
 
@@ -56,6 +62,8 @@ fn main() -> Result<()> {
                 args.edit_dirty,
                 args.drc_data.clone(),
                 args.drc_statis.clone(),
+                args.antenna_data.clone(),
+                args.antenna_statis.clone(),
                 args.map_root.clone(),
             )))
         }),
