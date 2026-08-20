@@ -1,6 +1,9 @@
 mod app;
+mod camera3d;
 mod canvas_gpu;
+mod canvas_gpu3d;
 mod map_data;
+mod nav3d;
 
 use std::path::PathBuf;
 
@@ -66,7 +69,10 @@ fn main() -> Result<()> {
                 args.antenna_data.clone(),
                 args.antenna_statis.clone(),
                 args.map_root.clone(),
-                _cc.wgpu_render_state.as_ref().map(|s| s.target_format).unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb),
+                _cc.wgpu_render_state
+                    .as_ref()
+                    .map(|s| s.target_format)
+                    .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb),
             )))
         }),
     )
