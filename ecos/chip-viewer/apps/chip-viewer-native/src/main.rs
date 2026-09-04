@@ -64,6 +64,9 @@ struct Args {
 
     #[arg(long)]
     x11: bool,
+
+    #[arg(long)]
+    wayland: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -140,21 +143,87 @@ fn check_libxkbcommon_x11() -> bool {
     }
 }
 
+pub fn is_running_under_cage() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let mut pid = std::process::id();
+        while pid > 1 {
+            if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                if comm.trim().eq_ignore_ascii_case("cage") {
+                    return true;
+                }
+            }
+            if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+                if cmdline.split('\0').any(|arg| {
+                    std::path::Path::new(arg)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().eq_ignore_ascii_case("cage"))
+                        .unwrap_or(false)
+                }) {
+                    return true;
+                }
+            }
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                if let Some(paren_idx) = stat.rfind(')') {
+                    let rest = &stat[paren_idx + 1..];
+                    let fields: Vec<&str> = rest.split_whitespace().collect();
+                    if fields.len() >= 2 {
+                        if let Ok(ppid) = fields[1].parse::<u32>() {
+                            if ppid == pid || ppid <= 1 {
+                                break;
+                            }
+                            pid = ppid;
+                            continue;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    false
+}
+
+pub fn is_nested_wayland_display(wayland_display: Option<&str>) -> bool {
+    match wayland_display {
+        Some(socket) => {
+            let socket_trimmed = socket.trim();
+            !socket_trimmed.is_empty() && !socket_trimmed.eq_ignore_ascii_case("wayland-0")
+        }
+        None => false,
+    }
+}
+
+pub fn is_safe_wayland_environment(env: &GraphicsEnvironment) -> bool {
+    if !env.is_wsl {
+        return true;
+    }
+    if is_running_under_cage() || std::env::var_os("CAGE_SOCKET").is_some() {
+        return true;
+    }
+    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+    is_nested_wayland_display(wayland_display.as_deref())
+}
+
 fn configure_linux_window_backend(args: &Args, env: &GraphicsEnvironment) -> Result<()> {
     if !cfg!(target_os = "linux") {
         return Ok(());
     }
 
-    let explicit_wayland = std::env::var("ECOS_WINDOW_BACKEND")
-        .map(|v| v.eq_ignore_ascii_case("wayland"))
-        .unwrap_or(false);
+    let safe_wayland = is_safe_wayland_environment(env);
+
+    let explicit_wayland = args.wayland
+        || std::env::var("ECOS_WINDOW_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
 
     let explicit_x11 = args.x11
         || std::env::var("ECOS_WINDOW_BACKEND")
             .map(|v| v.eq_ignore_ascii_case("x11"))
             .unwrap_or(false);
 
-    let wsl_prefers_x11 = env.is_wsl && std::env::var_os("DISPLAY").is_some() && !explicit_wayland;
+    let wsl_prefers_x11 =
+        env.is_wsl && std::env::var_os("DISPLAY").is_some() && !safe_wayland && !explicit_wayland;
 
     let force_x11 = explicit_x11 || wsl_prefers_x11;
 
@@ -184,6 +253,10 @@ fn configure_linux_window_backend(args: &Args, env: &GraphicsEnvironment) -> Res
                 "ECOS: WSLg detected - defaulting to X11 to prevent Weston compositor crash (microsoft/wslg#1386)"
             );
         }
+    } else if env.is_wsl && safe_wayland && !explicit_x11 {
+        eprintln!(
+            "ECOS: safe Wayland compositor detected (cage / nested compositor) - preserving Wayland backend"
+        );
     }
 
     eprintln!(
@@ -347,19 +420,7 @@ pub fn select_adapter_from_candidates(
         }
     }
 
-    for adapter in adapters {
-        let info = adapter.get_info();
-        let surface_ok = surface.map_or(true, |s| adapter.is_surface_supported(s));
-        if surface_ok {
-            eprintln!(
-                "ECOS eframe: fallback to surface-compatible adapter '{}' ({:?})",
-                info.name, info.backend
-            );
-            return Ok(adapter.clone());
-        }
-    }
-
-    Err("No surface-compatible graphics adapter found".to_string())
+    Err("No surface-compatible hardware graphics adapter found".to_string())
 }
 
 pub fn create_native_options(
@@ -618,7 +679,41 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            "No surface-compatible graphics adapter found"
+            "No surface-compatible hardware graphics adapter found"
         );
+    }
+
+    #[test]
+    fn test_is_nested_wayland_display() {
+        assert!(!is_nested_wayland_display(None));
+        assert!(!is_nested_wayland_display(Some("")));
+        assert!(!is_nested_wayland_display(Some("wayland-0")));
+        assert!(!is_nested_wayland_display(Some("WAYLAND-0")));
+        assert!(is_nested_wayland_display(Some("wayland-1")));
+        assert!(is_nested_wayland_display(Some("wayland-2")));
+        assert!(is_nested_wayland_display(Some("cage-wayland-0")));
+    }
+
+    #[test]
+    fn test_safe_wayland_on_non_wsl() {
+        let env = GraphicsEnvironment {
+            is_wsl: false,
+            has_dxg: false,
+            has_d3d12_mesa: false,
+            has_dzn: false,
+        };
+        assert!(is_safe_wayland_environment(&env));
+    }
+
+    #[test]
+    fn test_wayland_cli_flag_parsing() {
+        let args = Args::try_parse_from([
+            "chip-viewer-native",
+            "--manifest",
+            "/tmp/m.json",
+            "--wayland",
+        ]);
+        assert!(args.is_ok());
+        assert!(args.unwrap().wayland);
     }
 }
