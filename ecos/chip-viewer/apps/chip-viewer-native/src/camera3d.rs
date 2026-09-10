@@ -434,6 +434,65 @@ impl OrbitCamera {
         perspective(self.fov_y, aspect.max(0.05), near, far).mul(view)
     }
 
+    pub fn stereo_view_proj(self, aspect: f32, separation_ratio: f32) -> (Mat4, Mat4, Vec3, Vec3) {
+        let eye = self.eye();
+        let cos_p = self.pitch.cos();
+        let sin_p = self.pitch.sin();
+        let cos_y = self.yaw.cos();
+        let sin_y = self.yaw.sin();
+        let forward = Vec3::new(-cos_p * cos_y, -cos_p * sin_y, -sin_p);
+        let right = Vec3::new(-sin_y, cos_y, 0.0);
+        let up = Vec3::new(-sin_p * cos_y, -sin_p * sin_y, cos_p);
+
+        let separation = (self.distance * separation_ratio.clamp(0.001, 0.20)).max(0.001);
+        let half_sep = separation * 0.5;
+
+        let left_eye = eye.sub(right.scale(half_sep));
+        let right_eye = eye.add(right.scale(half_sep));
+
+        // Off-axis parallel stereo: both eyes share the exact same view orientation
+        let left_view = Mat4::from_cols([
+            [right.x, up.x, -forward.x, 0.0],
+            [right.y, up.y, -forward.y, 0.0],
+            [right.z, up.z, -forward.z, 0.0],
+            [
+                -right.dot(left_eye),
+                -up.dot(left_eye),
+                forward.dot(left_eye),
+                1.0,
+            ],
+        ]);
+        let right_view = Mat4::from_cols([
+            [right.x, up.x, -forward.x, 0.0],
+            [right.y, up.y, -forward.y, 0.0],
+            [right.z, up.z, -forward.z, 0.0],
+            [
+                -right.dot(right_eye),
+                -up.dot(right_eye),
+                forward.dot(right_eye),
+                1.0,
+            ],
+        ]);
+
+        let near = (self.distance * 0.001).clamp(0.01, 50.0);
+        let far = (self.distance * 50.0).max(50_000_000.0);
+
+        let f = 1.0 / (self.fov_y * 0.5).tan();
+        let aspect = aspect.max(0.05);
+        // Frustum shear for zero-parallax convergence at self.distance
+        let shear = (half_sep / self.distance.max(1.0)) * (f / aspect);
+
+        let left_proj = perspective_stereo(self.fov_y, aspect, near, far, shear);
+        let right_proj = perspective_stereo(self.fov_y, aspect, near, far, -shear);
+
+        (
+            left_proj.mul(left_view),
+            right_proj.mul(right_view),
+            left_eye,
+            right_eye,
+        )
+    }
+
     pub fn ray_from_screen(
         self,
         pos: [f32; 2],
@@ -625,11 +684,16 @@ pub fn look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
 }
 
 pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    perspective_stereo(fov_y, aspect, near, far, 0.0)
+}
+
+pub fn perspective_stereo(fov_y: f32, aspect: f32, near: f32, far: f32, offset_x: f32) -> Mat4 {
     let f = 1.0 / (fov_y * 0.5).tan();
+    let aspect = aspect.max(0.05);
     Mat4::from_cols([
         [f / aspect, 0.0, 0.0, 0.0],
         [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, far / (near - far), -1.0],
+        [offset_x, 0.0, far / (near - far), -1.0],
         [0.0, 0.0, (far * near) / (near - far), 0.0],
     ])
 }
@@ -829,5 +893,75 @@ mod tests {
         assert!((camera.distance - 200.0).abs() < 1e-3);
         assert!((camera.target.x - 90.0).abs() < 1e-3);
         assert!((camera.target.y - 95.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_stereo_view_proj_separation_and_convergence() {
+        let mut camera = OrbitCamera {
+            target: Vec3::new(500.0, 500.0, 50.0),
+            distance: 1000.0,
+            yaw: 45_f32.to_radians(),
+            pitch: 35_f32.to_radians(),
+            ..OrbitCamera::default()
+        };
+        let (left_vp, right_vp, left_eye, right_eye) = camera.stereo_view_proj(1.33, 0.03);
+        assert!(left_vp.invert().is_some());
+        assert!(right_vp.invert().is_some());
+        let eye = camera.eye();
+        // Eyes should be offset symmetrically from center eye
+        let left_dist = left_eye.sub(eye).length();
+        let right_dist = right_eye.sub(eye).length();
+        assert!((left_dist - right_dist).abs() < 1e-3);
+        assert!((left_dist - 15.0).abs() < 1e-2); // 1000 * 0.03 * 0.5 = 15.0
+
+        // Zero-parallax test: target point must project to exact (0, 0) in NDC for BOTH eyes
+        let t_left =
+            left_vp.transform_point([camera.target.x, camera.target.y, camera.target.z, 1.0]);
+        let t_right =
+            right_vp.transform_point([camera.target.x, camera.target.y, camera.target.z, 1.0]);
+        let ndc_l = [t_left[0] / t_left[3], t_left[1] / t_left[3]];
+        let ndc_r = [t_right[0] / t_right[3], t_right[1] / t_right[3]];
+        assert!(
+            ndc_l[0].abs() < 1e-3,
+            "Left target NDC X should be 0, got {}",
+            ndc_l[0]
+        );
+        assert!(
+            ndc_l[1].abs() < 1e-3,
+            "Left target NDC Y should be 0, got {}",
+            ndc_l[1]
+        );
+        assert!(
+            ndc_r[0].abs() < 1e-3,
+            "Right target NDC X should be 0, got {}",
+            ndc_r[0]
+        );
+        assert!(
+            ndc_r[1].abs() < 1e-3,
+            "Right target NDC Y should be 0, got {}",
+            ndc_r[1]
+        );
+
+        // Panning lockstep test: when panning, target still stays at (0, 0) with zero disparity
+        camera.pan(100.0, -50.0);
+        let (left_vp2, right_vp2, _, _) = camera.stereo_view_proj(1.33, 0.03);
+        let t_l2 =
+            left_vp2.transform_point([camera.target.x, camera.target.y, camera.target.z, 1.0]);
+        let t_r2 =
+            right_vp2.transform_point([camera.target.x, camera.target.y, camera.target.z, 1.0]);
+        assert!((t_l2[0] / t_l2[3]).abs() < 1e-3);
+        assert!((t_r2[0] / t_r2[3]).abs() < 1e-3);
+
+        // Top-down steep pitch test (pitch 88 deg)
+        camera.pitch = 88_f32.to_radians();
+        let (left_vp_top, right_vp_top, _, _) = camera.stereo_view_proj(1.33, 0.03);
+        assert!(left_vp_top.invert().is_some());
+        assert!(right_vp_top.invert().is_some());
+        let top_l =
+            left_vp_top.transform_point([camera.target.x, camera.target.y, camera.target.z, 1.0]);
+        let top_r =
+            right_vp_top.transform_point([camera.target.x, camera.target.y, camera.target.z, 1.0]);
+        assert!((top_l[0] / top_l[3]).abs() < 1e-3);
+        assert!((top_r[0] / top_r[3]).abs() < 1e-3);
     }
 }

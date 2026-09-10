@@ -165,6 +165,8 @@ struct LoadedViewer {
     show_3d_grid: bool,
     shading_style_3d: crate::canvas_gpu3d::ShadingStyle,
     lighting_preset_3d: chip_display::LightingPreset,
+    anaglyph_mode_3d: crate::canvas_gpu3d::AnaglyphMode,
+    stereo_separation_3d: f32,
     z_cut_ratio_3d: f32,
     layer_stack: LayerStack,
     view3d_fitted: bool,
@@ -2165,6 +2167,8 @@ impl LoadedViewer {
             show_3d_grid: true,
             shading_style_3d: crate::canvas_gpu3d::ShadingStyle::Normal,
             lighting_preset_3d: chip_display::LightingPreset::Studio,
+            anaglyph_mode_3d: crate::canvas_gpu3d::AnaglyphMode::Off,
+            stereo_separation_3d: 0.025,
             z_cut_ratio_3d: 0.0,
             layer_stack: LayerStack::default(),
             view3d_fitted: false,
@@ -2980,6 +2984,45 @@ impl LoadedViewer {
                 )
                 .on_hover_text("Top-down cross-section cut (0% = Full Stack, 30-50% = Slice top power roof to see routing, 100% = Base only)");
             });
+
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("3D Glasses:")
+                        .small()
+                        .color(ecos_text_secondary()),
+                );
+                let mut anaglyph = self.anaglyph_mode_3d;
+                egui::ComboBox::from_id_source("anaglyph_mode_combo")
+                    .selected_text(anaglyph.label())
+                    .show_ui(ui, |ui| {
+                        for a in crate::canvas_gpu3d::AnaglyphMode::ALL {
+                            ui.selectable_value(&mut anaglyph, *a, a.label());
+                        }
+                    });
+                if anaglyph != self.anaglyph_mode_3d {
+                    self.anaglyph_mode_3d = anaglyph;
+                    ui.ctx().request_repaint();
+                }
+            });
+            if self.anaglyph_mode_3d != crate::canvas_gpu3d::AnaglyphMode::Off {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    let mut sep_percent = self.stereo_separation_3d * 100.0;
+                    let resp = ui.add(
+                        egui::Slider::new(&mut sep_percent, 0.5..=6.0)
+                            .custom_formatter(|n, _| format!("{:.1}%", n))
+                            .text("3D Depth"),
+                    );
+                    if resp.changed() {
+                        self.stereo_separation_3d = (sep_percent / 100.0).clamp(0.005, 0.060);
+                        ui.ctx().request_repaint();
+                    }
+                    resp.on_hover_text(
+                        "Stereoscopic eye separation / parallax depth for Red/Blue & Red/Cyan 3D glasses (2.5% = standard)",
+                    );
+                });
+            }
         }
     }
 
@@ -4931,18 +4974,55 @@ impl LoadedViewer {
                 .as_ref()
                 .map(|g| g.target_format)
                 .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
+            let (uniform_left, uniform_right) =
+                if self.anaglyph_mode_3d != crate::canvas_gpu3d::AnaglyphMode::Off {
+                    let (left_vp, right_vp, left_eye, right_eye) =
+                        current_camera.stereo_view_proj(aspect, self.stereo_separation_3d);
+                    let u_left = crate::canvas_gpu3d::CanvasUniform3d::from_stereo_view_proj(
+                        left_vp,
+                        left_eye,
+                        current_camera,
+                        bg,
+                        self.show_3d_grid,
+                        true,
+                        z_cut_dbu,
+                        self.shading_style_3d,
+                        self.lighting_preset_3d,
+                        elapsed_time,
+                    );
+                    let u_right = crate::canvas_gpu3d::CanvasUniform3d::from_stereo_view_proj(
+                        right_vp,
+                        right_eye,
+                        current_camera,
+                        bg,
+                        self.show_3d_grid,
+                        true,
+                        z_cut_dbu,
+                        self.shading_style_3d,
+                        self.lighting_preset_3d,
+                        elapsed_time,
+                    );
+                    (u_left, Some(u_right))
+                } else {
+                    (
+                        crate::canvas_gpu3d::CanvasUniform3d::from_camera(
+                            current_camera,
+                            aspect,
+                            bg,
+                            self.show_3d_grid,
+                            true,
+                            z_cut_dbu,
+                            self.shading_style_3d,
+                            self.lighting_preset_3d,
+                            elapsed_time,
+                        ),
+                        None,
+                    )
+                };
             let callback = crate::canvas_gpu3d::CanvasGpu3dCallback {
-                uniform: crate::canvas_gpu3d::CanvasUniform3d::from_camera(
-                    current_camera,
-                    aspect,
-                    bg,
-                    self.show_3d_grid,
-                    true,
-                    z_cut_dbu,
-                    self.shading_style_3d,
-                    self.lighting_preset_3d,
-                    elapsed_time,
-                ),
+                uniform: uniform_left,
+                uniform_right,
+                anaglyph_mode: self.anaglyph_mode_3d,
                 instances,
                 instances_key,
                 target_pixels: [target_w, target_h],
@@ -4968,6 +5048,14 @@ impl LoadedViewer {
             current_camera.pitch.to_degrees(),
             current_camera.z_scale
         );
+        if self.anaglyph_mode_3d != crate::canvas_gpu3d::AnaglyphMode::Off {
+            let _ = write!(
+                self.status_line_buffer,
+                "  [3D Stereo: {} ({:.1}%)]",
+                self.anaglyph_mode_3d.label(),
+                self.stereo_separation_3d * 100.0
+            );
+        }
         painter.text(
             canvas.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,

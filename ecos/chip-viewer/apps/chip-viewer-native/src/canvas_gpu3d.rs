@@ -35,6 +35,40 @@ impl ShadingStyle {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum AnaglyphMode {
+    #[default]
+    Off = 0,
+    RedCyanColor = 1,
+    Dubois = 2,
+    Monochrome = 3,
+}
+
+impl AnaglyphMode {
+    pub const ALL: &'static [AnaglyphMode] = &[
+        AnaglyphMode::Off,
+        AnaglyphMode::RedCyanColor,
+        AnaglyphMode::Dubois,
+        AnaglyphMode::Monochrome,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off (2D Monocular)",
+            Self::RedCyanColor => "Red/Cyan (Color 3D)",
+            Self::Dubois => "Red/Cyan (Dubois Photometric 3D)",
+            Self::Monochrome => "Red/Blue (Monochrome 3D)",
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct AnaglyphUniform {
+    mode: u32,
+    _pad: [u32; 3],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CanvasUniform3d {
@@ -105,6 +139,58 @@ impl CanvasUniform3d {
         Self {
             view_proj: view_proj.cols,
             camera_pos: camera.eye().to_array(),
+            z_scale: camera.z_scale,
+            light_dir: light.to_array(),
+            distance: camera.distance,
+            bg_color,
+            render_flags: flags,
+            z_cut,
+            shading_mode: shading_style as u32,
+            time,
+            lighting_mode: lighting_preset as u32,
+            _pad_uniform: [0; 3],
+        }
+    }
+
+    pub fn from_stereo_view_proj(
+        view_proj: crate::camera3d::Mat4,
+        eye_pos: crate::camera3d::Vec3,
+        camera: OrbitCamera,
+        bg_color: [f32; 4],
+        show_grid: bool,
+        show_fog: bool,
+        z_cut: f32,
+        shading_style: ShadingStyle,
+        lighting_preset: chip_display::LightingPreset,
+        time: f32,
+    ) -> Self {
+        let light = match lighting_preset {
+            chip_display::LightingPreset::Laboratory => {
+                crate::camera3d::Vec3::new(0.0, 0.0, 1.0).normalized()
+            }
+            chip_display::LightingPreset::Dramatic => {
+                crate::camera3d::Vec3::new(0.70, -0.45, 0.55).normalized()
+            }
+            chip_display::LightingPreset::Blueprint => {
+                crate::camera3d::Vec3::new(0.20, -0.20, 0.95).normalized()
+            }
+            chip_display::LightingPreset::Softbox => {
+                crate::camera3d::Vec3::new(0.35, -0.35, 0.85).normalized()
+            }
+            chip_display::LightingPreset::Studio => {
+                crate::camera3d::Vec3::new(0.45, -0.25, 0.86).normalized()
+            }
+        };
+        let mut flags = 0u32;
+        if show_grid {
+            flags |= 1;
+        }
+        if show_fog {
+            flags |= 2;
+        }
+        Self {
+            view_proj: view_proj.cols,
+            camera_pos: eye_pos.to_array(),
             z_scale: camera.z_scale,
             light_dir: light.to_array(),
             distance: camera.distance,
@@ -687,6 +773,81 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+const WGSL_ANAGLYPH_COMPOSITE_SHADER: &str = r#"
+struct AnaglyphUniform {
+    mode: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var left_tex: texture_2d<f32>;
+@group(0) @binding(1) var right_tex: texture_2d<f32>;
+@group(0) @binding(2) var color_samp: sampler;
+@group(0) @binding(3) var<uniform> u_anaglyph: AnaglyphUniform;
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, 1.0),
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    out.uv = uvs[vertex_index];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let c_left = textureSample(left_tex, color_samp, in.uv);
+    let c_right = textureSample(right_tex, color_samp, in.uv);
+
+    let l = c_left.rgb;
+    let r = c_right.rgb;
+
+    var result: vec3<f32>;
+
+    if (u_anaglyph.mode == 1u) {
+        // Red/Cyan Color Anaglyph: Left eye -> Red, Right eye -> Green + Blue
+        result = vec3<f32>(l.r, r.g, r.b);
+    } else if (u_anaglyph.mode == 2u) {
+        // Dubois Photometric Anaglyph (Optimized for Red/Cyan filters to eliminate ghosting)
+        let red = 0.437 * l.r + 0.449 * l.g + 0.164 * l.b - 0.011 * r.r - 0.032 * r.g - 0.007 * r.b;
+        let green = -0.062 * l.r - 0.062 * l.g - 0.024 * l.b + 0.377 * r.r + 0.761 * r.g + 0.009 * r.b;
+        let blue = -0.048 * l.r - 0.050 * l.g - 0.017 * l.b - 0.026 * r.r - 0.093 * r.g + 1.234 * r.b;
+        result = clamp(vec3<f32>(red, green, blue), vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (u_anaglyph.mode == 3u) {
+        // Monochrome / Luminance Anaglyph
+        let lum_l = dot(l, vec3<f32>(0.299, 0.587, 0.114));
+        let lum_r = dot(r, vec3<f32>(0.299, 0.587, 0.114));
+        result = vec3<f32>(lum_l, lum_r, lum_r);
+    } else {
+        result = l;
+    }
+
+    let alpha = max(c_left.a, c_right.a);
+    return vec4<f32>(result, alpha);
+}
+"#;
+
 const WGSL_MIP_DOWNSAMPLE_SHADER: &str = r#"
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_samp: sampler;
@@ -941,9 +1102,11 @@ impl OverviewBakeTarget {
 
 struct OffscreenTarget {
     color_view: wgpu::TextureView,
+    color_view_right: wgpu::TextureView,
     msaa_color_view: wgpu::TextureView,
     msaa_depth_view: wgpu::TextureView,
     blit_bind_group: wgpu::BindGroup,
+    anaglyph_bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
 }
@@ -954,14 +1117,20 @@ struct CanvasGpu3dResources {
     grid_vertex_buffer: wgpu::Buffer,
     grid_vertex_count: u32,
     grid_bind_group: wgpu::BindGroup,
+    grid_bind_group_right: wgpu::BindGroup,
     blit_pipeline: wgpu::RenderPipeline,
+    anaglyph_pipeline: wgpu::RenderPipeline,
     downsample_pipeline: wgpu::RenderPipeline,
     scene_bind_group_layout: wgpu::BindGroupLayout,
     blit_bind_group_layout: wgpu::BindGroupLayout,
+    anaglyph_bind_group_layout: wgpu::BindGroupLayout,
     downsample_bind_group_layout: wgpu::BindGroupLayout,
     uniform_buffer: wgpu::Buffer,
+    uniform_buffer_right: wgpu::Buffer,
+    anaglyph_uniform_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     scene_bind_group: wgpu::BindGroup,
+    scene_bind_group_right: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     current_key: Option<u64>,
     instance_count: u32,
@@ -976,8 +1145,20 @@ impl CanvasGpu3dResources {
             return None;
         }
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Canvas 3D Uniform Buffer"),
+            label: Some("Canvas 3D Uniform Buffer (Left)"),
             size: std::mem::size_of::<CanvasUniform3d>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_buffer_right = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Canvas 3D Uniform Buffer (Right)"),
+            size: std::mem::size_of::<CanvasUniform3d>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let anaglyph_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Canvas 3D Anaglyph Uniform Buffer"),
+            size: std::mem::size_of::<AnaglyphUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -998,6 +1179,10 @@ impl CanvasGpu3dResources {
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("WGSL_BLIT_3D_SHADER"),
             source: wgpu::ShaderSource::Wgsl(WGSL_BLIT_SHADER.into()),
+        });
+        let anaglyph_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("WGSL_ANAGLYPH_COMPOSITE_SHADER"),
+            source: wgpu::ShaderSource::Wgsl(WGSL_ANAGLYPH_COMPOSITE_SHADER.into()),
         });
         let downsample_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("WGSL_MIP_DOWNSAMPLE_SHADER"),
@@ -1030,12 +1215,26 @@ impl CanvasGpu3dResources {
                 ],
             });
         let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Canvas 3D Scene Bind Group"),
+            label: Some("Canvas 3D Scene Bind Group (Left)"),
             layout: &scene_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let scene_bind_group_right = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Canvas 3D Scene Bind Group (Right)"),
+            layout: &scene_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer_right.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -1058,11 +1257,19 @@ impl CanvasGpu3dResources {
                 }],
             });
         let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Canvas 3D Grid Bind Group"),
+            label: Some("Canvas 3D Grid Bind Group (Left)"),
             layout: &grid_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+        let grid_bind_group_right = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Canvas 3D Grid Bind Group (Right)"),
+            layout: &grid_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer_right.as_entire_binding(),
             }],
         });
         let blit_bind_group_layout =
@@ -1083,6 +1290,48 @@ impl CanvasGpu3dResources {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let anaglyph_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Canvas 3D Anaglyph Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
                         count: None,
                     },
                 ],
@@ -1125,6 +1374,12 @@ impl CanvasGpu3dResources {
             bind_group_layouts: &[&blit_bind_group_layout],
             push_constant_ranges: &[],
         });
+        let anaglyph_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Canvas 3D Anaglyph Pipeline Layout"),
+                bind_group_layouts: &[&anaglyph_bind_group_layout],
+                push_constant_ranges: &[],
+            });
         let downsample_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Canvas 3D Downsample Pipeline Layout"),
@@ -1258,6 +1513,31 @@ impl CanvasGpu3dResources {
             multiview: None,
             cache: None,
         });
+        let anaglyph_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Canvas 3D Anaglyph Pipeline"),
+            layout: Some(&anaglyph_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &anaglyph_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &anaglyph_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         let downsample_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Canvas 3D Downsample Pipeline"),
             layout: Some(&downsample_pipeline_layout),
@@ -1297,14 +1577,20 @@ impl CanvasGpu3dResources {
             grid_vertex_buffer,
             grid_vertex_count,
             grid_bind_group,
+            grid_bind_group_right,
             blit_pipeline,
+            anaglyph_pipeline,
             downsample_pipeline,
             scene_bind_group_layout,
             blit_bind_group_layout,
+            anaglyph_bind_group_layout,
             downsample_bind_group_layout,
             uniform_buffer,
+            uniform_buffer_right,
+            anaglyph_uniform_buffer,
             instance_buffer,
             scene_bind_group,
+            scene_bind_group_right,
             sampler,
             current_key: None,
             instance_count: 0,
@@ -1322,7 +1608,21 @@ impl CanvasGpu3dResources {
             return;
         }
         let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Canvas 3D Color Resolve"),
+            label: Some("Canvas 3D Color Resolve (Left)"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let color_right = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Canvas 3D Color Resolve (Right)"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -1364,6 +1664,7 @@ impl CanvasGpu3dResources {
             view_formats: &[],
         });
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_view_right = color_right.create_view(&wgpu::TextureViewDescriptor::default());
         let msaa_color_view = msaa_color.create_view(&wgpu::TextureViewDescriptor::default());
         let msaa_depth_view = msaa_depth.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1380,11 +1681,35 @@ impl CanvasGpu3dResources {
                 },
             ],
         });
+        let anaglyph_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Canvas 3D Anaglyph Bind Group"),
+            layout: &self.anaglyph_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&color_view_right),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.anaglyph_uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
         self.offscreen = Some(OffscreenTarget {
             color_view,
+            color_view_right,
             msaa_color_view,
             msaa_depth_view,
             blit_bind_group,
+            anaglyph_bind_group,
             width,
             height,
         });
@@ -1461,6 +1786,8 @@ impl CanvasGpu3dResources {
 
 pub struct CanvasGpu3dCallback {
     pub uniform: CanvasUniform3d,
+    pub uniform_right: Option<CanvasUniform3d>,
+    pub anaglyph_mode: AnaglyphMode,
     pub instances: Arc<Vec<GpuShapeInstance3d>>,
     pub instances_key: u64,
     pub target_pixels: [u32; 2],
@@ -1491,6 +1818,8 @@ impl egui_wgpu::CallbackTrait for CanvasGpu3dCallback {
         let height = self.target_pixels[1].max(1);
         resources.ensure_offscreen(device, width, height);
         resources.ensure_scene(queue, &self.instances, self.instances_key);
+
+        // Left Eye / Monocular Pass
         queue.write_buffer(
             &resources.uniform_buffer,
             0,
@@ -1501,7 +1830,7 @@ impl egui_wgpu::CallbackTrait for CanvasGpu3dCallback {
         };
         {
             let mut pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Canvas 3D Scene Pass"),
+                label: Some("Canvas 3D Left Scene Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &offscreen.msaa_color_view,
                     resolve_target: Some(&offscreen.color_view),
@@ -1538,6 +1867,65 @@ impl egui_wgpu::CallbackTrait for CanvasGpu3dCallback {
                 pass.draw(6..36, 0..resources.instance_count);
             }
         }
+
+        // Right Eye Pass (if anaglyph is enabled)
+        if self.anaglyph_mode != AnaglyphMode::Off {
+            if let Some(uniform_right) = &self.uniform_right {
+                queue.write_buffer(
+                    &resources.uniform_buffer_right,
+                    0,
+                    bytemuck::bytes_of(uniform_right),
+                );
+                let anaglyph_uniform = AnaglyphUniform {
+                    mode: self.anaglyph_mode as u32,
+                    _pad: [0; 3],
+                };
+                queue.write_buffer(
+                    &resources.anaglyph_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&anaglyph_uniform),
+                );
+                {
+                    let mut pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Canvas 3D Right Scene Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &offscreen.msaa_color_view,
+                            resolve_target: Some(&offscreen.color_view_right),
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: uniform_right.bg_color[0] as f64,
+                                    g: uniform_right.bg_color[1] as f64,
+                                    b: uniform_right.bg_color[2] as f64,
+                                    a: uniform_right.bg_color[3] as f64,
+                                }),
+                                store: wgpu::StoreOp::Discard,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &offscreen.msaa_depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Discard,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    if (uniform_right.render_flags & 1) != 0 {
+                        pass.set_pipeline(&resources.grid_pipeline);
+                        pass.set_bind_group(0, &resources.grid_bind_group_right, &[]);
+                        pass.set_vertex_buffer(0, resources.grid_vertex_buffer.slice(..));
+                        pass.draw(0..resources.grid_vertex_count, 0..1);
+                    }
+                    if resources.instance_count > 0 {
+                        pass.set_pipeline(&resources.scene_pipeline);
+                        pass.set_bind_group(0, &resources.scene_bind_group_right, &[]);
+                        pass.draw(6..36, 0..resources.instance_count);
+                    }
+                }
+            }
+        }
         Vec::new()
     }
 
@@ -1562,9 +1950,15 @@ impl egui_wgpu::CallbackTrait for CanvasGpu3dCallback {
             return;
         }
         render_pass.set_scissor_rect(clip_min_x, clip_min_y, clip_w, clip_h);
-        render_pass.set_pipeline(&resources.blit_pipeline);
-        render_pass.set_bind_group(0, &offscreen.blit_bind_group, &[]);
-        render_pass.draw(0..6, 0..1);
+        if self.anaglyph_mode == AnaglyphMode::Off {
+            render_pass.set_pipeline(&resources.blit_pipeline);
+            render_pass.set_bind_group(0, &offscreen.blit_bind_group, &[]);
+            render_pass.draw(0..6, 0..1);
+        } else {
+            render_pass.set_pipeline(&resources.anaglyph_pipeline);
+            render_pass.set_bind_group(0, &offscreen.anaglyph_bind_group, &[]);
+            render_pass.draw(0..6, 0..1);
+        }
     }
 }
 
@@ -2022,6 +2416,147 @@ mod tests {
     }
 
     #[test]
+    fn test_canvas_3d_anaglyph_render_pass_execution() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()));
+        let Some(adapter) = adapter else {
+            return;
+        };
+        let device_result =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None));
+        let Ok((device, queue)) = device_result else {
+            return;
+        };
+        let Some(mut resources) =
+            CanvasGpu3dResources::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb)
+        else {
+            return;
+        };
+        resources.ensure_offscreen(&device, 256, 256);
+
+        let instances = vec![GpuShapeInstance3d {
+            rect_dbu: [0, 0, 1000, 1000],
+            z0: 0.0,
+            z1: 100.0,
+            fill_rgba: pack_rgba_u32([255, 0, 0, 255]),
+            material_params: 0,
+            semantic_info: 0,
+            flags: 0,
+            _pad: [0; 2],
+        }];
+        resources.ensure_scene(&queue, &instances, 42);
+
+        let camera = OrbitCamera::default();
+        let (left_vp, right_vp, left_eye, right_eye) = camera.stereo_view_proj(1.0, 0.03);
+        let u_left = CanvasUniform3d::from_stereo_view_proj(
+            left_vp,
+            left_eye,
+            camera,
+            [0.1, 0.1, 0.1, 1.0],
+            true,
+            true,
+            1e9,
+            ShadingStyle::Normal,
+            chip_display::LightingPreset::Studio,
+            0.0,
+        );
+        let u_right = CanvasUniform3d::from_stereo_view_proj(
+            right_vp,
+            right_eye,
+            camera,
+            [0.1, 0.1, 0.1, 1.0],
+            true,
+            true,
+            1e9,
+            ShadingStyle::Normal,
+            chip_display::LightingPreset::Studio,
+            0.0,
+        );
+
+        for &mode in &[
+            AnaglyphMode::RedCyanColor,
+            AnaglyphMode::Dubois,
+            AnaglyphMode::Monochrome,
+        ] {
+            queue.write_buffer(&resources.uniform_buffer, 0, bytemuck::bytes_of(&u_left));
+            queue.write_buffer(
+                &resources.uniform_buffer_right,
+                0,
+                bytemuck::bytes_of(&u_right),
+            );
+            let anaglyph_uniform = AnaglyphUniform {
+                mode: mode as u32,
+                _pad: [0; 3],
+            };
+            queue.write_buffer(
+                &resources.anaglyph_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&anaglyph_uniform),
+            );
+
+            let offscreen = resources.offscreen.as_ref().unwrap();
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            // Pass 1: Left
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Anaglyph Left Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &offscreen.msaa_color_view,
+                        resolve_target: Some(&offscreen.color_view),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &offscreen.msaa_depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&resources.scene_pipeline);
+                pass.set_bind_group(0, &resources.scene_bind_group, &[]);
+                pass.draw(6..36, 0..resources.instance_count);
+            }
+            // Pass 2: Right
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Anaglyph Right Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &offscreen.msaa_color_view,
+                        resolve_target: Some(&offscreen.color_view_right),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &offscreen.msaa_depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&resources.scene_pipeline);
+                pass.set_bind_group(0, &resources.scene_bind_group_right, &[]);
+                pass.draw(6..36, 0..resources.instance_count);
+            }
+            queue.submit(Some(encoder.finish()));
+        }
+    }
+
+    #[test]
     fn overview_blend_factor_is_smooth_and_bounded() {
         let world = test_world();
         let mut camera = OrbitCamera::default();
@@ -2084,5 +2619,11 @@ mod tests {
             return;
         };
         assert_eq!(resources.grid_vertex_count, 404);
+    }
+
+    #[test]
+    fn anaglyph_uniform_size_is_multiple_of_16() {
+        assert_eq!(std::mem::size_of::<AnaglyphUniform>() % 16, 0);
+        assert_eq!(std::mem::size_of::<AnaglyphUniform>(), 16);
     }
 }
