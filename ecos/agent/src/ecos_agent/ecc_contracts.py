@@ -14,6 +14,7 @@ class ECCStepName(StrEnum):
     TIMING_OPT = "Timing optimization"
     ROUTING = "route"
     DRC = "drc"
+    ANTENNA = "antenna"
     LVS = "lvs"
     FILLER = "filler"
     POST_ROUTE_LEC = "postRouteLec"

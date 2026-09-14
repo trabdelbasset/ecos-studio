@@ -56,6 +56,7 @@ export interface ParametersData {
   frequency_max?: number
   'Bottom layer': string
   'Top layer': string
+  run_antenna?: boolean
   'PDK Root'?: string
   cpu_filelist?: string
   soc_filelist?: string
@@ -122,6 +123,7 @@ export interface ConfigData {
   frequencyMax: number
   bottomLayer: string
   topLayer: string
+  runAntenna: boolean
   frontend: FrontendConfigData
 }
 
@@ -161,6 +163,7 @@ function getDefaultConfig(): ConfigData {
     frequencyMax: 100,
     bottomLayer: FIXED_BOTTOM_LAYER,
     topLayer: FIXED_TOP_LAYER,
+    runAntenna: false,
     frontend: {
       coreId: '',
       cpuWrapperId: '',
@@ -513,6 +516,12 @@ export function parseParametersRecord(raw: Record<string, unknown>): ParametersD
         : undefined,
     sim_program_names: normalizeStringArray(raw.sim_program_names),
     sim_all_tests: losslessBoolean(raw.sim_all_tests, 'sim_all_tests'),
+    run_antenna:
+      raw.run_antenna != null
+        ? losslessBoolean(raw.run_antenna, 'run_antenna')
+        : raw['Run antenna'] != null
+          ? losslessBoolean(raw['Run antenna'], 'Run antenna')
+          : undefined,
   }
 }
 
@@ -550,6 +559,7 @@ export function transformParametersToConfig(data: ParametersData): ConfigData {
     frequencyMax: data['Frequency max [MHz]'] ?? 100,
     bottomLayer: FIXED_BOTTOM_LAYER,
     topLayer: FIXED_TOP_LAYER,
+    runAntenna: !!(data.run_antenna ?? false),
     frontend: {
       coreId: data.frontend_core_id || data.core_id || '',
       cpuWrapperId: data.cpu_wrapper_id || data.frontend_core_id || data.core_id || '',
@@ -600,6 +610,7 @@ export function transformConfigToParameters(config: ConfigData): ParametersData 
     'Top layer': FIXED_TOP_LAYER,
   }
   out['PDK Root'] = config.pdkRoot ?? ''
+  out.run_antenna = config.runAntenna
   out['Design Tool'] = config.designTool
   out.description = config.description
   if (config.designTool === 'frontend') {

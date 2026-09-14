@@ -177,6 +177,12 @@ const resetConfig = () => {
                 <Checkbox v-model="config.routabilityOptFlag" :binary="true" />
               </div>
             </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Antenna check</label>
+                <Checkbox v-model="config.runAntenna" :binary="true" />
+              </div>
+            </div>
             <div class="field">
               <div class="label-row">
                 <label>Target Density</label>

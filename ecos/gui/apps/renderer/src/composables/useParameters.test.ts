@@ -92,6 +92,7 @@ describe('useParameters helpers', () => {
       frequencyMax: 500,
       bottomLayer: 'MET2',
       topLayer: 'MET5',
+      runAntenna: false,
       frontend: {
         coreId: '',
         cpuWrapperId: '',

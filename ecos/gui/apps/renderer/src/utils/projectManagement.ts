@@ -430,6 +430,7 @@ const FLOW_STEP_ALIASES: Record<string, FlowStep> = {
   route: 'Route',
   routing: 'Route',
   drc: 'DRC',
+  antenna: 'DRC',
   lvs: 'LVS',
   filler: 'Filler',
   // postRouteLec runs between Filler and RCX; same failure-first rationale.
